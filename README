@@ -1,0 +1,3 @@
+# PFSENSE-BACKUP 
+
+This tool was developed for the purpose of having an automated script that would backup the PFSENSE config file (or for any config file that you want), and send to google drive. Feel free to contribute by opening Issues on GitHub and submitting your Merge Requests :)
