@@ -2,7 +2,7 @@
 
 from __future__ import print_function
 
-import os
+import os, sys, getopt, logging
 
 from datetime import datetime
 
@@ -13,7 +13,7 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 
 FOLDER_MIME_TYPE   = os.environ.get('GOOGLE_DRIVE_FOLDER_MIME_TYPE', 'application/vnd.google-apps.folder')
-BACKUP_FILE_MIME_TYPE = os.environ.get('GOOGLE_DRIVE_BACKUP_FILE_MIME_TYPE', 'text/xml')
+FILE_MIME_TYPE = os.environ.get('GOOGLE_DRIVE_BACKUP_FILE_MIME_TYPE', 'text/xml')
 
 def create_service(client_secret_file, api_name, api_version, *scopes, prefix=''):
     CLIENT_SECRET_FILE = client_secret_file
@@ -45,7 +45,7 @@ def create_service(client_secret_file, api_name, api_version, *scopes, prefix=''
 
     try:
         service = build(API_SERVICE_NAME, API_VERSION, credentials=creds, static_discovery=False)
-        print(API_SERVICE_NAME, API_VERSION, 'service created successfully')
+        print('Token created successfully!')
         return service
     except Exception as e:
         print(e)
@@ -69,60 +69,90 @@ def get_resource(name, drive, mime_type, parent_id):
         results = results.execute()
         resource = results.get('files', [])[0]
     except:
-        print('Resource {name}, not found in parent with id {parent_id}')
+        print(f'{"Folder" if mime_type == FOLDER_MIME_TYPE else "File" } named: {name} not found in parent folder with id: {parent_id}')
  
     return resource
 
 def create_resource(drive, name, parent_id, mime_type, local_file_path=None):
     file_metadata = {
         'name':name,
-        'parents': [parent_id]
+        'parents': [parent_id],
+        'mimeType': mime_type
     }
-
-    if not local_file_path and mime_type == BACKUP_FILE_MIME_TYPE:
-        local_file_path = name
-
-    media_content = MediaFileUpload(local_file_path, mimetype=mime_type)
+    media_content = None
+    if mime_type == FILE_MIME_TYPE:
+        media_content = MediaFileUpload(local_file_path, mimetype=mime_type)
 
     try:
         resource = drive.files().create(
             body=file_metadata,
             media_body=media_content
         ).execute()
+        print(f'{"Folder" if mime_type == FOLDER_MIME_TYPE else "File" }: {name} created!')
     except Exception as e:
         print(e)
 
     return resource
 
-def create_if_not_exists(drive, name, parent_id, mime_type):
-    resource = get_resource(drive=drive, name=name, parent_id=parent_id) 
+def create_if_not_exists(drive, name, parent_id, mime_type, local_file_path=None):
+    resource = get_resource(drive=drive, name=name, parent_id=parent_id, mime_type=mime_type) 
     if not resource:
-         create_resource(drive=drive,name=name,parent_id=parent_id,mime_type=mime_type)
+         resource = create_resource(drive=drive, name=name, parent_id=parent_id, mime_type=mime_type, local_file_path=local_file_path)
+    return resource
 
-def main():
+def backup(target_file_path, root_folder_parent_id, drive):
+
+    CURRENT_DAY   = datetime.now().day
+    CURRENT_MONTH = datetime.now().month
+    CURRENT_YEAR  = datetime.now().year
+    
+    year_folder  = create_if_not_exists(name=CURRENT_YEAR, drive=drive, parent_id=root_folder_parent_id, mime_type=FOLDER_MIME_TYPE)
+    month_folder = create_if_not_exists(name=CURRENT_MONTH, drive=drive, parent_id=year_folder['id'], mime_type=FOLDER_MIME_TYPE)
+    
+    file_name=f'{CURRENT_DAY}-{CURRENT_MONTH}-{CURRENT_YEAR}-{target_file_path.split("/").pop()}'
+    create_if_not_exists(name=file_name, drive=drive, parent_id=month_folder['id'], mime_type=FILE_MIME_TYPE, local_file_path=target_file_path)
+
+def main(argv):
 
     API_NAME    ='drive'
     API_VERSION = 'v3'
 
-    CLIENT_SECRET_FILE = os.environ.get('GOOGLE_DRIVE_CLIENT_SECRET_FILE', 'credentials.json') 
-    
-    CURRENT_DAY   = datetime.now().day
-    CURRENT_MONTH = datetime.now().month
-    CURRENT_YEAR  = datetime.now().year
+    # If modifying these scopes, delete the file from tokens folder.
+    DRIVE_SCOPES =  os.environ.get('GOOGLE_DRIVE_SCOPES', 'https://www.googleapis.com/auth/drive').split(',')
 
     PARENT_ID = os.environ.get('GOOGLE_DRIVE_PARENT_ID_FOLDER')
 
-    # If modifying these scopes, delete the file from tokens folder.
-    SCOPES = ['https://www.googleapis.com/auth/drive']
+    CLIENT_SECRET_FILE = os.environ.get('GOOGLE_DRIVE_CLIENT_SECRET_FILE', 'credentials.json')
+    BACKUP_TARGET_FILE_PATH   = os.environ.get('BACKUP_TARGET_FILE_PATH', '/config')
 
-    drive = create_service(CLIENT_SECRET_FILE, API_NAME, API_VERSION, SCOPES)
+    only_renew_token = False
 
-    year_folder = create_if_not_exists(name=CURRENT_YEAR, drive=drive, parent_id=PARENT_ID, mime_type=FOLDER_MIME_TYPE)
-    
-    create_if_not_exists(name=CURRENT_YEAR, drive=drive, parent_id=year_folder['id'], mime_type=BACKUP_FILE_MIME_TYPE)
+    longopts=["help",
+              "renew_token",
+              "api_name=", 
+              "api_version=", 
+              "drive_scopes=", 
+              "parent_id=", 
+              "secret_file=",
+              "file="]
 
-    # if not folder_exists:
-    #     create_resource(drive, name=name, parent_id=PARENT_ID 'application/vnd.google-apps.folder')
+    opts, args = getopt.getopt(args=argv, shortopts="hp:s:f:r", longopts=longopts)
+
+    for opt, arg in opts:
+        if opt in ('-h', '--help'): help()
+        elif opt in ('-r', '--renew_token'): only_renew_token = True 
+        else:
+            if opt == '--api_name': API_NAME = arg
+            if opt == '--api_version': API_VERSION = arg
+            if opt == '--drive_scopes': DRIVE_SCOPES = arg.split(',')
+            if opt in ('-p', '--parent_id'): PARENT_ID = arg
+            if opt in ('-s', '--secret_file'): CLIENT_SECRET_FILE = arg
+            if opt in ('-f', '--file'):  BACKUP_TARGET_FILE_PATH = arg
+
+    drive = create_service(CLIENT_SECRET_FILE, API_NAME, API_VERSION, DRIVE_SCOPES)
+
+    if not only_renew_token:
+        backup(BACKUP_TARGET_FILE_PATH, PARENT_ID, drive)
 
 if __name__=='__main__':
-    main()
+    main(sys.argv[1:])
